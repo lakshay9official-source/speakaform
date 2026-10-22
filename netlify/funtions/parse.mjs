@@ -6,6 +6,7 @@ const hits = new Map();
 const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
 
 export default async (req) => {
+  if (req.method === 'GET') return json({ ok: true, key_configured: !!process.env.GEMINI_API_KEY }); // health check
   if (req.method !== 'POST') return json({ error: 'POST only' }, 405);
 
   // Simple per-visitor limit (resets when the function instance restarts)
@@ -59,7 +60,11 @@ Rules:
       });
     } catch { return json({ error: 'Could not reach Gemini' }, 502); }
 
-    if (res.status === 404 || res.status === 400) continue; // model name not available, try next
+    if (res.status === 404 || res.status === 400) {
+      const t = await res.text().catch(() => '');
+      if (/API key/i.test(t)) return json({ error: 'Gemini API key is invalid' }, 500);
+      continue; // model name not available, try next
+    }
     if (res.status === 429) return json({ error: 'Gemini free limit reached. Try again shortly.' }, 429);
     if (!res.ok) return json({ error: 'Gemini error ' + res.status }, 502);
 
