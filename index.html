@@ -114,9 +114,9 @@ const I={
 };
 I.spkOff='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM16.5 9.5l5 5M21.5 9.5l-5 5"/></svg>';
 const Q=[
-  {id:'name',q:'What’s your full name?',type:'text',demo:['My name is Aarav Mehta','Aarav Mehta']},
+  {id:'name',q:'What’s your full name?',type:'name',demo:['My name is Aarav Mehta','Aarav Mehta']},
   {id:'dob',q:'What’s your date of birth?',type:'text',hint:'Say it any way you like.',demo:['twelfth March ninety eight','12 March 1998']},
-  {id:'phone',q:'What’s the best phone number to reach you?',type:'text',demo:['nine eight seven six five, four three two one zero','+91 98765 43210']},
+  {id:'phone',q:'What’s the best phone number to reach you?',type:'phone',demo:['nine eight seven six five, four three two one zero','+91 98765 43210']},
   {id:'plan',q:'Which plan fits you best?',type:'choice',opts:[['Basic','Free'],['Plus','₹199 a month'],['Pro','₹499 a month']],demo:['the middle one, no wait, yes, the middle one','Plus']},
   {id:'note',q:'Anything else you’d like us to know?',type:'long',hint:'Take your time. Tap done when you finish.',demo:['it would be great to have Gujarati and a dark mode','It would be great to have Gujarati and a dark mode.']}
 ];
@@ -233,6 +233,40 @@ function listen(){
   rec.onend=()=>{if(!rec)return;rec=null;finish(text)};
   try{rec.start()}catch(e){rec=null;S.mic='idle';render()}
 }
+// Plain-code cleanup for things that don't need an LLM (instant, free, works offline)
+const NUM={zero:0,oh:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9};
+const MULT={double:2,triple:3};
+const has=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+function digitsFrom(t){
+  let out='',m=1;
+  for(const x of t.toLowerCase().replace(/[^a-z0-9+ ]/g,' ').split(/\s+/)){
+    if(has(MULT,x)){m=MULT[x];continue}
+    if(x==='plus'){out+='+';continue}
+    const d=/^\+?\d+$/.test(x)?x:(has(NUM,x)?String(NUM[x]):null);
+    if(d!==null){out+=d.repeat(m);m=1}
+  }
+  return out;
+}
+function local(q,text){
+  if(q.type==='phone'){
+    const d=digitsFrom(text),n=d.replace(/\D/g,'').length;
+    if(n>=10)return{value:d,needs_confirm:false};
+    if(n>0)return{value:d,needs_confirm:true,follow_up:'I only caught '+n+' digits. Say the number again, or tap Edit.'};
+    return null;
+  }
+  if(q.type==='name'){
+    const v=text.replace(/^\s*(my name is|my name['’]s|i am|i['’]m|this is|it['’]s|it is)\s+/i,'').replace(/[.,]+$/,'').trim();
+    return v?{value:v.replace(/(^|\s)\p{L}/gu,c=>c.toUpperCase()),needs_confirm:false}:null;
+  }
+  if(q.type==='choice'){
+    const t=text.toLowerCase(),o=q.opts.map(x=>x[0]);
+    const hit=o.filter(x=>t.includes(x.toLowerCase()));
+    if(hit.length===1)return{value:hit[0],needs_confirm:false};
+    const ord=[[/\b(first|1st)\b/,0],[/\b(second|2nd)\b/,1],[/\bmiddle\b/,Math.floor(o.length/2)],[/\b(third|3rd)\b/,2],[/\blast\b/,o.length-1]].filter(x=>x[0].test(t));
+    if(ord.length===1&&o[ord[0][1]])return{value:o[ord[0][1]],needs_confirm:false};
+  }
+  return null;
+}
 async function finish(text){
   text=text.trim();const q=Q[S.i];
   if(!text){S.mic='idle';render();setStatus('Didn’t catch that. Tap to try again.');return}
@@ -241,11 +275,20 @@ async function finish(text){
   if(short&&/\bskip\b/.test(t)){S.ans[q.id]='';go(S.i+1);return}
   if(short&&/\b(repeat|say that again|say it again)\b/.test(t)){S.mic='idle';render();say(q.q);return}
   S.mic='processing';render();const tr=$('#tr');if(tr)tr.innerHTML='<b>'+esc(text)+'</b>';
-  let r;
-  try{
-    const res=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q.q,type:q.type,options:q.opts?q.opts.map(o=>o[0]):null,transcript:text})});
-    r=await res.json();if(!res.ok)throw new Error(r.error||'bad response');
-  }catch(e){r={value:text,needs_confirm:true,follow_up:null}}
+  let r=local(q,text);
+  if(!r||q.type==='name'){
+    try{
+      const res=await fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q.q,type:q.type,options:q.opts?q.opts.map(o=>o[0]):null,transcript:text})});
+      const j=await res.json();if(!res.ok)throw new Error(j.error||('HTTP '+res.status));
+      r=j;
+    }catch(e){
+      console.warn('Smart parse unavailable:',e.message);
+      if(!r){
+        if(q.type==='choice'){S.mic='idle';render();setStatus('Didn’t match an option. Tap one or try again.');return}
+        r={value:text,needs_confirm:false};
+      }
+    }
+  }
   S.pending=r.value||text;S.follow=r.needs_confirm&&r.follow_up?r.follow_up:null;
   S.mic='confirm';render();say(S.follow||('Got it. '+S.pending));
 }
@@ -256,7 +299,7 @@ async function submit(b){
     const res=await fetch('/',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});
     if(!res.ok)throw new Error(res.status);
     S.screen='done';hush();render();
-  }catch(e){b.disabled=false;b.textContent='Couldn’t submit. Tap to retry'}
+  }catch(e){console.warn('Submit failed:',e.message);b.disabled=false;b.textContent='Couldn’t submit ('+e.message+'). Tap to retry'}
 }
 
 document.addEventListener('click',e=>{
